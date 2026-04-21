@@ -119,6 +119,11 @@ jobs:
           github_token: ${{ steps.app-token.outputs.token }}
           trigger_phrase: 'agent-c'
           show_full_output: true
+          # Agent B (the thp-triage-bot GitHub App) opens PRs that then fire
+          # the pull_request.labeled event — the default Bot-initiator check
+          # would refuse the run. Allow our own bot explicitly. Private repo,
+          # so no external-App prompt-injection risk per the action's warning.
+          allowed_bots: 'thp-triage-bot[bot]'
           claude_args: |
             --permission-mode bypassPermissions
             --max-turns 60
