@@ -1,0 +1,167 @@
+name: Agent B — implement
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: agent-b-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+# Only run when the label is ai-triage OR someone comments @agent-b retry.
+# Skip if the issue is paused, already being worked on, or escalated.
+jobs:
+  agent-b:
+    if: |
+      (
+        github.event_name == 'issues' &&
+        github.event.action == 'labeled' &&
+        github.event.label.name == 'ai-triage'
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request == null &&
+        startsWith(github.event.comment.body, '@agent-b retry')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.TRIAGE_APP_ID }}
+          private-key: ${{ secrets.TRIAGE_APP_PRIVATE_KEY }}
+
+      - name: Check blockers
+        id: guard
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          N="${{ github.event.issue.number }}"
+          for blocker in paused agent-working needs-human; do
+            if gh api "repos/${{ github.repository }}/issues/$N/labels" --jq '.[].name' | grep -Fxq "$blocker"; then
+              echo "skip: issue #$N has label $blocker"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - if: steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Compute agent branch name
+        id: branch
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          N="${{ github.event.issue.number }}"
+          # Slug from issue title: lowercase → collapse non-alnum into '-' →
+          # strip leading/trailing '-' → cap at 40 chars → strip trailing '-'
+          # again in case the cut created one mid-hyphen.
+          TITLE=$(gh api "repos/${{ github.repository }}/issues/$N" --jq '.title')
+          SLUG=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//' | cut -c1-40 | sed 's/-$//')
+          [ -z "$SLUG" ] && SLUG="untitled"
+          BRANCH="ai/issue-${N}-${SLUG}"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Branch will be: $BRANCH"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Mark agent-working
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          source .github/scripts/lib/labels.sh
+          add_label "${{ github.event.issue.number }}" agent-working
+
+      - if: steps.guard.outputs.skip != 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        if: steps.guard.outputs.skip != 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        if: steps.guard.outputs.skip != 'true'
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run Claude Code Action (Agent B)
+        if: steps.guard.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          system_prompt_file: .github/agents/agent-b.system.md
+          trigger_phrase: 'agent-b'
+          # We provide the task directly instead of waiting for a mention.
+          direct_prompt: |
+            A new issue has been labeled `ai-triage`:
+              repo: ${{ github.repository }}
+              issue: #${{ github.event.issue.number }}
+            Follow your system prompt. Post the four-question investigation
+            comment first. Then the plan checklist. Then create a branch
+            named EXACTLY `${{ steps.branch.outputs.name }}` (do not choose a
+            different slug), implement the fix step by step, run
+            `bash .github/scripts/verify.sh`, commit the screenshots
+            artifact reference, push, and open a PR targeting `develop`
+            with label `ai-pr`. If any step fails three times, stop and
+            label the issue `needs-human`.
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-screenshots-${{ github.event.issue.number }}
+          path: playwright-artifacts/
+          if-no-files-found: ignore
+
+      - name: Run protected-paths guard on the produced branch
+        if: success() && steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # Agent B should have pushed the computed branch + opened a PR.
+          # We use the exact branch name from the earlier step (no glob).
+          BRANCH='${{ steps.branch.outputs.name }}'
+          PR_NUMBER=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR found for branch $BRANCH — Agent B may have stopped early."
+            exit 0
+          fi
+          # Check the branch out locally so the diff command in the guard works.
+          git fetch origin "$BRANCH":"$BRANCH"
+          git checkout "$BRANCH"
+          bash .github/scripts/guard-protected-paths.sh develop "$PR_NUMBER"
+
+      - name: Remove agent-working label
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          source .github/scripts/lib/labels.sh
+          remove_label "${{ github.event.issue.number }}" agent-working
+
+      - name: Escalate on workflow failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          source .github/scripts/lib/labels.sh
+          add_label "${{ github.event.issue.number }}" needs-human
+          gh issue comment "${{ github.event.issue.number }}" \
+            --body "Agent B workflow failed. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
