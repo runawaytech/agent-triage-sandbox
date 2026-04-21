@@ -162,8 +162,13 @@ jobs:
             exit 0
           fi
           # Check the branch out locally so the diff command in the guard works.
-          git fetch origin "$BRANCH":"$BRANCH"
-          git checkout "$BRANCH"
+          # Agent B pushes + checks out the branch in the shared working tree,
+          # so we may already be on it. Update the remote ref without the
+          # local-ref refspec, then only switch branches if needed.
+          git fetch origin "$BRANCH"
+          if [ "$(git symbolic-ref --short -q HEAD)" != "$BRANCH" ]; then
+            git checkout "$BRANCH"
+          fi
           bash .github/scripts/guard-protected-paths.sh develop "$PR_NUMBER"
 
       - name: Remove agent-working label
