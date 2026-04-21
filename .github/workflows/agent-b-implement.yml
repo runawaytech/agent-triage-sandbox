@@ -10,8 +10,11 @@ concurrency:
   group: agent-b-${{ github.event.issue.number }}
   cancel-in-progress: false
 
-# Only run when the label is ai-triage OR someone comments @agent-b retry.
-# Skip if the issue is paused, already being worked on, or escalated.
+# Triggers:
+# - Issue gains label `ai-triage` (implement mode).
+# - Issue comment starts with `@agent-b retry` (implement mode, re-run).
+# - PR comment starts with `@agent-b address-review` (address-review mode).
+# Skip if the issue/PR is paused, already being worked on, or escalated.
 jobs:
   agent-b:
     if: |
@@ -24,6 +27,11 @@ jobs:
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request == null &&
         startsWith(github.event.comment.body, '@agent-b retry')
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        startsWith(github.event.comment.body, '@agent-b address-review')
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -41,6 +49,20 @@ jobs:
         with:
           app-id: ${{ secrets.TRIAGE_APP_ID }}
           private-key: ${{ secrets.TRIAGE_APP_PRIVATE_KEY }}
+
+      - name: Detect mode
+        id: mode
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ] \
+             && [ -n "${{ github.event.issue.pull_request.url }}" ] \
+             && [[ "${{ github.event.comment.body }}" == "@agent-b address-review"* ]]; then
+            echo "mode=address-review" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=implement" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Check blockers
         id: guard
@@ -65,7 +87,7 @@ jobs:
 
       - name: Compute agent branch name
         id: branch
-        if: steps.guard.outputs.skip != 'true'
+        if: steps.guard.outputs.skip != 'true' && steps.mode.outputs.mode == 'implement'
         run: |
           N="${{ github.event.issue.number }}"
           # Slug from issue title: lowercase → collapse non-alnum into '-' →
@@ -111,8 +133,8 @@ jobs:
             echo 'AGENTBEOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Run Claude Code Action (Agent B)
-        if: steps.guard.outputs.skip != 'true'
+      - name: Run Claude Code Action (Agent B — implement)
+        if: steps.guard.outputs.skip != 'true' && steps.mode.outputs.mode == 'implement'
         uses: anthropics/claude-code-action@5d5c10a4f389689f992ea10bb14dcb6fcc83146d # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -122,7 +144,6 @@ jobs:
           claude_args: |
             --permission-mode bypassPermissions
             --max-turns 80
-          # We provide the task directly instead of waiting for a mention.
           prompt: |
             ${{ steps.sysprompt.outputs.content }}
 
@@ -140,6 +161,44 @@ jobs:
             `develop` with label `ai-pr`. If any step fails three times,
             stop and label the issue `needs-human`.
 
+      - name: Run Claude Code Action (Agent B — address-review)
+        if: steps.guard.outputs.skip != 'true' && steps.mode.outputs.mode == 'address-review'
+        uses: anthropics/claude-code-action@5d5c10a4f389689f992ea10bb14dcb6fcc83146d # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          trigger_phrase: 'agent-b'
+          show_full_output: true
+          claude_args: |
+            --permission-mode bypassPermissions
+            --max-turns 80
+          prompt: |
+            ${{ steps.sysprompt.outputs.content }}
+
+            ---
+
+            You are responding to Agent C's review on PR #${{ steps.mode.outputs.pr_number }} in ${{ github.repository }}.
+
+            Steps:
+            1. `gh pr checkout ${{ steps.mode.outputs.pr_number }}`.
+            2. Read Agent C's latest `## Review — round N` comment with
+               `gh pr view ${{ steps.mode.outputs.pr_number }} --comments`.
+            3. For each BLOCKER and IMPORTANT item, decide ACCEPT / PARTIAL / REJECT per your REVIEW RESPONSE POLICY.
+               - REJECT requires citing (a) convention file:line, (b) a CORE PRINCIPLE, or (c) out-of-scope.
+               - Do NOT capitulate to pressure — stand firm when justified.
+            4. Apply accepted fixes, commit with Conventional Commit messages
+               referencing the issue number.
+            5. Run `bash .github/scripts/verify.sh` — retry up to 3 times on failure.
+            6. Push the commits to the PR branch.
+            7. Post ONE PR comment titled `## Rebuttal — round N` listing each
+               point with ACCEPT / PARTIAL / REJECT and the commit SHA.
+            8. Do NOT merge. Do NOT close. Agent C will re-review automatically
+               via `synchronize`.
+
+            If this is already round 3 and you see the same point re-raised
+            without new evidence, do NOT change the code; post a rebuttal
+            restating your position and let the workflow escalate.
+
       - name: Upload Playwright artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -149,7 +208,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Run protected-paths guard on the produced branch
-        if: success() && steps.guard.outputs.skip != 'true'
+        if: success() && steps.guard.outputs.skip != 'true' && steps.mode.outputs.mode == 'implement'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |

@@ -1,0 +1,167 @@
+name: Agent C — review
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: agent-c-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+# Triggers:
+# - PR gains label `ai-pr` (initial review).
+# - PR head is updated with new commits (re-review after Agent B addresses).
+# - PR comment starts with `@agent-c re-review` (manual kick).
+jobs:
+  agent-c:
+    if: |
+      (
+        github.event_name == 'pull_request' &&
+        github.event.action == 'labeled' &&
+        github.event.label.name == 'ai-pr'
+      ) ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.action == 'synchronize' &&
+        contains(github.event.pull_request.labels.*.name, 'ai-pr')
+      ) ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        startsWith(github.event.comment.body, '@agent-c')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.TRIAGE_APP_ID }}
+          private-key: ${{ secrets.TRIAGE_APP_PRIVATE_KEY }}
+
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # pull_request events carry pull_request.number.
+          # issue_comment on a PR carries issue.number, which IS the PR number.
+          N="${{ github.event.pull_request.number || github.event.issue.number }}"
+          echo "number=$N" >> "$GITHUB_OUTPUT"
+
+      - name: Check blockers
+        id: guard
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          PR="${{ steps.pr.outputs.number }}"
+          LABELS=$(gh api "repos/${{ github.repository }}/issues/$PR/labels" --jq '.[].name')
+          for blocker in paused needs-human rebuttal-round-3; do
+            if echo "$LABELS" | grep -Fxq "$blocker"; then
+              echo "skip: PR #$PR has label $blocker"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          # Don't race with Agent B writing commits.
+          if echo "$LABELS" | grep -Fxq "agent-working"; then
+            echo "skip: agent-working in progress"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - if: steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+
+      - name: Compute current round
+        id: round
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          PR="${{ steps.pr.outputs.number }}"
+          CUR=$(gh api "repos/${{ github.repository }}/issues/$PR/labels" --jq '.[].name' | bash .github/scripts/round-counter.sh)
+          NEXT=$((CUR + 1))
+          echo "current=$CUR"  >> "$GITHUB_OUTPUT"
+          echo "next=$NEXT"    >> "$GITHUB_OUTPUT"
+          echo "Round: current=$CUR next=$NEXT"
+
+      - name: Load Agent C system prompt
+        id: sysprompt
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          {
+            echo 'content<<AGENTCEOF'
+            cat .github/agents/agent-c.system.md
+            echo 'AGENTCEOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude Code Action (Agent C)
+        if: steps.guard.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@5d5c10a4f389689f992ea10bb14dcb6fcc83146d # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          trigger_phrase: 'agent-c'
+          show_full_output: true
+          claude_args: |
+            --permission-mode bypassPermissions
+            --max-turns 60
+          prompt: |
+            ${{ steps.sysprompt.outputs.content }}
+
+            ---
+
+            You are reviewing PR #${{ steps.pr.outputs.number }} in
+            ${{ github.repository }}. This is REVIEW ROUND ${{ steps.round.outputs.next }}.
+
+            Steps:
+            1. Fetch the PR body, linked issue, Agent B's investigation and plan comments, and any prior-round review/rebuttal comments. Use `gh pr view`, `gh issue view`, and `gh api`.
+            2. Read the diff: `gh pr diff ${{ steps.pr.outputs.number }}`.
+            3. Form the review per your SEVERITY TAXONOMY and BUDGET rules.
+            4. If any prior review is present, acknowledge each rebuttal
+               explicitly before adding new points; drop points where B's
+               REJECT cited valid convention or scope.
+            5. Post ONE top-level PR comment starting with
+               `## Review — round ${{ steps.round.outputs.next }}`.
+            6. Apply labels:
+               - If OVERALL is `request-changes` → add `rebuttal-round-${{ steps.round.outputs.next }}` and remove any older `rebuttal-round-*`.
+               - If OVERALL is `approve` → do NOT add a rebuttal label.
+            7. Do NOT merge the PR. A human merges.
+
+      - name: Escalate on round-4 deadlock
+        if: always() && steps.round.outputs.next == '4'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          source .github/scripts/lib/labels.sh
+          PR="${{ steps.pr.outputs.number }}"
+          add_label "$PR" needs-human
+          gh pr comment "$PR" \
+            --body "🚨 Review loop reached round 4 — freezing PR. A human must decide. Both agents will skip further work on this PR until \`needs-human\` is removed."
+
+      - name: Escalate on workflow failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          source .github/scripts/lib/labels.sh
+          PR="${{ steps.pr.outputs.number }}"
+          add_label "$PR" needs-human
+          gh pr comment "$PR" \
+            --body "Agent C workflow failed. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
