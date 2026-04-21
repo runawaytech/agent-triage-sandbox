@@ -230,6 +230,17 @@ jobs:
           fi
           bash .github/scripts/guard-protected-paths.sh develop "$PR_NUMBER"
 
+      - name: Notify — PR ready for review
+        if: success() && steps.guard.outputs.skip != 'true' && steps.mode.outputs.mode == 'implement'
+        uses: ./.github/actions/discord-notify
+        with:
+          webhook_url: ${{ secrets.DISCORD_NOTIFY_WEBHOOK_URL }}
+          content: |
+            📝 **New AI PR ready for review**
+            Issue: ${{ github.server_url }}/${{ github.repository }}/issues/${{ github.event.issue.number }}
+            Branch: `${{ steps.branch.outputs.name }}`
+            Agent C is reviewing automatically.
+
       - name: Remove agent-working label
         if: always()
         env:

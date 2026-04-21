@@ -1,0 +1,35 @@
+name: Notify — needs human
+
+on:
+  issues:
+    types: [labeled]
+  pull_request:
+    types: [labeled]
+
+jobs:
+  notify:
+    if: github.event.label.name == 'needs-human'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Compose message
+        id: msg
+        env:
+          KIND: ${{ github.event.pull_request != null && 'PR' || 'Issue' }}
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          TITLE: ${{ github.event.pull_request.title || github.event.issue.title }}
+          URL: ${{ github.event.pull_request.html_url || github.event.issue.html_url }}
+        run: |
+          TITLE_SHORT=$(printf '%s' "$TITLE" | head -c 120)
+          {
+            echo 'content<<MSGEOF'
+            echo "🚨 **Needs human:** $KIND [#$NUMBER — $TITLE_SHORT]($URL)"
+            echo "on \`${{ github.repository }}\`"
+            echo "Check labels + latest comment to decide; remove \`needs-human\` to resume agents."
+            echo 'MSGEOF'
+          } >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/discord-notify
+        with:
+          webhook_url: ${{ secrets.DISCORD_NOTIFY_WEBHOOK_URL }}
+          content: ${{ steps.msg.outputs.content }}
