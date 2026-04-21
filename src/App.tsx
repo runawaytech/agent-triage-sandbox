@@ -17,7 +17,7 @@ function App() {
         </div>
         <div>
           <h1>Get started</h1>
-          <p>
+          <p id="hello" data-testid="hello">
             Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
           </p>
         </div>
