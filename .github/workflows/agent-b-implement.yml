@@ -169,6 +169,9 @@ jobs:
           github_token: ${{ steps.app-token.outputs.token }}
           trigger_phrase: 'agent-b'
           show_full_output: true
+          # Agent C's review comment comes from the thp-triage-bot App; the
+          # default Bot-initiator check would refuse. Allow our own bot.
+          allowed_bots: 'thp-triage-bot[bot]'
           claude_args: |
             --permission-mode bypassPermissions
             --max-turns 80
