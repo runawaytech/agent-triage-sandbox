@@ -27,6 +27,12 @@ function App() {
         >
           Count is {count}
         </button>
+        <button
+          className="counter"
+          onClick={() => navigator.clipboard.writeText(String(count))}
+        >
+          Copy
+        </button>
       </section>
 
       <div className="ticks"></div>
