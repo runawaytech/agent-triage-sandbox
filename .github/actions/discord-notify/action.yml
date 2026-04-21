@@ -1,0 +1,35 @@
+name: Discord notify
+description: Post a message to a Discord channel via webhook.
+inputs:
+  webhook_url:
+    description: The Discord webhook URL (DISCORD_NOTIFY_WEBHOOK_URL secret).
+    required: true
+  content:
+    description: Plain-text message body (markdown allowed). Keep under 2000 chars.
+    required: true
+  username:
+    description: Override the webhook display name.
+    required: false
+    default: THP Triage Bot
+runs:
+  using: composite
+  steps:
+    - name: Post to Discord
+      shell: bash
+      env:
+        WEBHOOK_URL: ${{ inputs.webhook_url }}
+        CONTENT: ${{ inputs.content }}
+        USERNAME: ${{ inputs.username }}
+      run: |
+        if [ -z "$WEBHOOK_URL" ]; then
+          echo "::warning::DISCORD_NOTIFY_WEBHOOK_URL not set; skipping notify"
+          exit 0
+        fi
+        # Discord limits message content to 2000 chars; truncate defensively.
+        CONTENT_TRIM=$(printf '%s' "$CONTENT" | head -c 1900)
+        # Use jq to build JSON so content with newlines, quotes, backticks,
+        # or markdown is encoded safely.
+        jq -n --arg u "$USERNAME" --arg c "$CONTENT_TRIM" \
+          '{username: $u, content: $c}' \
+          | curl -sS -X POST -H "Content-Type: application/json" \
+              --data-binary @- "$WEBHOOK_URL"

@@ -1,0 +1,36 @@
+name: Notify — PR merged
+
+on:
+  pull_request:
+    types: [closed]
+
+# Only fire when the PR was actually merged (not just closed) AND it
+# carries the `ai-pr` label (so we don't spam on unrelated merges).
+jobs:
+  notify:
+    if: github.event.pull_request.merged == true && contains(github.event.pull_request.labels.*.name, 'ai-pr')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Compose message
+        id: msg
+        env:
+          PR_TITLE_RAW: ${{ github.event.pull_request.title }}
+          PR_BODY_RAW: ${{ github.event.pull_request.body }}
+        run: |
+          PR_TITLE=$(printf '%s' "$PR_TITLE_RAW" | head -c 120)
+          ISSUE_REF=$(printf '%s' "$PR_BODY_RAW" | grep -oE '#[0-9]+' | head -1 || true)
+          {
+            echo 'content<<MSGEOF'
+            echo "✅ **Merged:** [#${{ github.event.pull_request.number }} — $PR_TITLE](${{ github.event.pull_request.html_url }})"
+            if [ -n "$ISSUE_REF" ]; then
+              echo "Closes $ISSUE_REF"
+            fi
+            echo "by Agent B + C on \`${{ github.repository }}\`"
+            echo 'MSGEOF'
+          } >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/discord-notify
+        with:
+          webhook_url: ${{ secrets.DISCORD_NOTIFY_WEBHOOK_URL }}
+          content: ${{ steps.msg.outputs.content }}
