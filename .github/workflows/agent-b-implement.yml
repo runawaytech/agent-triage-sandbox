@@ -100,27 +100,40 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         run: bunx playwright install --with-deps chromium
 
+      - name: Load Agent B system prompt
+        id: sysprompt
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          {
+            echo 'content<<AGENTBEOF'
+            cat .github/agents/agent-b.system.md
+            echo 'AGENTBEOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run Claude Code Action (Agent B)
         if: steps.guard.outputs.skip != 'true'
         uses: anthropics/claude-code-action@5d5c10a4f389689f992ea10bb14dcb6fcc83146d # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
-          system_prompt_file: .github/agents/agent-b.system.md
           trigger_phrase: 'agent-b'
           # We provide the task directly instead of waiting for a mention.
-          direct_prompt: |
+          prompt: |
+            ${{ steps.sysprompt.outputs.content }}
+
+            ---
+
             A new issue has been labeled `ai-triage`:
               repo: ${{ github.repository }}
               issue: #${{ github.event.issue.number }}
-            Follow your system prompt. Post the four-question investigation
-            comment first. Then the plan checklist. Then create a branch
-            named EXACTLY `${{ steps.branch.outputs.name }}` (do not choose a
-            different slug), implement the fix step by step, run
-            `bash .github/scripts/verify.sh`, commit the screenshots
-            artifact reference, push, and open a PR targeting `develop`
-            with label `ai-pr`. If any step fails three times, stop and
-            label the issue `needs-human`.
+            Follow the system prompt above. Post the four-question
+            investigation comment first. Then the plan checklist. Then
+            create a branch named EXACTLY `${{ steps.branch.outputs.name }}`
+            (do not choose a different slug), implement the fix step by
+            step, run `bash .github/scripts/verify.sh`, commit the
+            screenshots artifact reference, push, and open a PR targeting
+            `develop` with label `ai-pr`. If any step fails three times,
+            stop and label the issue `needs-human`.
 
       - name: Upload Playwright artifacts
         if: always()
