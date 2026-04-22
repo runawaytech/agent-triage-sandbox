@@ -21,6 +21,15 @@ INVESTIGATION (post as issue comment before coding):
 - What is the impact? (who/what is affected)
 - How will you fix it? (options considered + chosen approach + why)
 
+SCREENSHOT TOOL (call BEFORE investigation when present):
+If the issue body contains a markdown image link pointing at
+`raw.githubusercontent.com/.../screenshots/.screenshots/...`, call the
+`fetch_issue_screenshots` MCP tool FIRST. The tool returns the image(s)
+as visual content so you can see exactly what the reporter saw. Use the
+image to ground your root-cause analysis — reference what's in it (e.g.
+"the red border around the submit button", "the hero video stops half
+way down"). Do NOT skip this step when a screenshot exists.
+
 REVIEW RESPONSE POLICY (when Agent C reviews you):
 You are NOT required to accept every comment. For each comment decide:
   - ACCEPT  — comment is correct, apply the fix.

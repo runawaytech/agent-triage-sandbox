@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "issue-screenshots": {
+      "command": "bun",
+      "args": [".github/mcp/issue-screenshots/index.ts"]
+    }
+  }
+}

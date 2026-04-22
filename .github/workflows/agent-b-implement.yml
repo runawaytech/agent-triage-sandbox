@@ -136,6 +136,13 @@ jobs:
       - name: Run Claude Code Action (Agent B — implement)
         if: steps.guard.outputs.skip != 'true' && steps.mode.outputs.mode == 'implement'
         uses: anthropics/claude-code-action@5d5c10a4f389689f992ea10bb14dcb6fcc83146d # v1
+        env:
+          # Inherited by the stdio MCP server spawned via claude_args.
+          # The server reads these from process.env (see
+          # .github/mcp/issue-screenshots/index.ts).
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ steps.app-token.outputs.token }}
@@ -148,6 +155,7 @@ jobs:
           claude_args: |
             --permission-mode bypassPermissions
             --max-turns 80
+            --mcp-config .github/mcp/issue-screenshots/mcp-config.json
           prompt: |
             ${{ steps.sysprompt.outputs.content }}
 
