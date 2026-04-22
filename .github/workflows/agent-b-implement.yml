@@ -141,6 +141,10 @@ jobs:
           github_token: ${{ steps.app-token.outputs.token }}
           trigger_phrase: 'agent-b'
           show_full_output: true
+          # Issues filed via the `/bug` Discord Worker are created as the
+          # thp-triage-bot App, so issues.labeled fires with sender.type=Bot.
+          # Allow our own bot to trigger the workflow.
+          allowed_bots: 'thp-triage-bot[bot]'
           claude_args: |
             --permission-mode bypassPermissions
             --max-turns 80
